@@ -12,25 +12,47 @@ BUILDROOT_VERSION=2020.02.1
 ###############################################################################
 # Misc
 ###############################################################################
-RELEASE=${RELEASE:-LSDK-20.04}
+RELEASE=${RELEASE:-LSDK-20.12}
 DDR_SPEED=${DDR_SPEED:-3200}
 SERDES=${SERDES:-8_5_2}
 UEFI_RELEASE=${UEFI_RELEASE:-RELEASE}
 SHALLOW=${SHALLOW:false}
+SECURE=${SECURE:false}
+ATF_DEBUG=${ATF_DEBUG:false}
+
+if [ "x$SHALLOW" == "xtrue" ]; then
+	SHALLOW_FLAG="--depth 1"
+fi
+
+if [ "x$ATF_DEBUG" == "xtrue" ]; then
+	ATF_DEBUG="DEBUG=1 LOG_LEVEL=40"
+	ATF_BUILD="debug"
+else
+	ATF_DEBUG=""
+	ATF_BUILD="release"
+fi
 
 mkdir -p build images
 ROOTDIR=`pwd`
 PARALLEL=$(getconf _NPROCESSORS_ONLN) # Amount of parallel jobs for the builds
 SPEED=2000_700_${DDR_SPEED}
-TOOLS="wget tar git make 7z unsquashfs dd vim mkfs.ext4 parted mkdosfs mcopy dtc iasl mkimage e2cp truncate qemu-system-aarch64 cpio rsync bc bison flex python unzip"
+TOOLS="tar git make 7z dd mkfs.ext4 parted mkdosfs mcopy dtc iasl mkimage e2cp truncate qemu-system-aarch64 cpio rsync bc bison flex python unzip"
+BL2=bl2_auto
 
 export PATH=$ROOTDIR/build/toolchain/gcc-linaro-7.4.1-2019.02-x86_64_aarch64-linux-gnu/bin:$PATH
 export CROSS_COMPILE=aarch64-linux-gnu-
 export ARCH=arm64
 
+REPO_PREFIX=`git log -1 --pretty=format:%h`
+echo "Repository prefix for images is $REPO_PREFIX"
+
 case "${SERDES}" in
 	2_*)
 		DPC=dpc-8_x_usxgmii.dtb
+		DPL=dpl-eth.8x10g.19.dtb
+	;;
+	4_*)
+		DPC=dpc-backplane.dtb
 		DPL=dpl-eth.8x10g.19.dtb
 	;;
 	8_*)
@@ -55,6 +77,15 @@ case "${SERDES}" in
 	;;
 	*)
 		echo "Please define SERDES configuration"
+		exit -1
+	;;
+esac
+
+case "${DDR_SPEED}" in
+	2400|2600|2900|3200)
+	;;
+	*)
+		echo "Please use one of allowed DDR speeds: 2400, 2600, 2900, 3200"
 		exit -1
 	;;
 esac
@@ -93,12 +124,17 @@ cd $ROOTDIR
 ###############################################################################
 # source code cloning
 ###############################################################################
-QORIQ_COMPONENTS="u-boot atf rcw restool mc-utils linux dpdk"
+QORIQ_COMPONENTS="u-boot atf rcw restool mc-utils linux dpdk cst"
 for i in $QORIQ_COMPONENTS; do
 	if [[ ! -d $ROOTDIR/build/$i ]]; then
 		echo "Cloing https://source.codeaurora.org/external/qoriq/qoriq-components/$i release $RELEASE"
 		cd $ROOTDIR/build
 		CHECKOUT=$RELEASE
+		# Release LSDK-20.12
+		if [ "x$i" == "xlinux" ] && [ "x$RELEASE" == "xLSDK-20.12" ]; then
+			CHECKOUT=LSDK-20.12-V5.4
+		fi
+		# Release LSDK-20.4
 		if [ "x$i" == "xu-boot" ] && [ "x$RELEASE" == "xLSDK-20.04" ]; then
 			CHECKOUT=LSDK-20.04-update-290520
 		fi
@@ -111,18 +147,11 @@ for i in $QORIQ_COMPONENTS; do
 		if [ "x$i" == "xrcw" ] && [ "x$RELEASE" == "xLSDK-20.04" ]; then
 			CHECKOUT=LSDK-20.04-update-290520
 		fi
-		if [ "x$i" == "xdpdk" ] && [ "x$RELEASE" == "xLSDK-20.04" ]; then
-			CHECKOUT=LSDK-19.09
-		fi
-		if [ "x$SHALLOW" == "xtrue" ]; then
-			git clone --depth=1 https://source.codeaurora.org/external/qoriq/qoriq-components/$i -b $CHECKOUT
-		else
-			git clone https://source.codeaurora.org/external/qoriq/qoriq-components/$i -b $CHECKOUT
-		fi
+		git clone $SHALLOW_FLAG https://source.codeaurora.org/external/qoriq/qoriq-components/$i -b $CHECKOUT
 		cd $i
 		if [ "x$i" == "xatf" ]; then
 			cd $ROOTDIR/build/atf/tools/fiptool
-			git clone https://github.com/NXP/ddr-phy-binary.git
+			git clone $SHALLOW_FLAG https://github.com/NXP/ddr-phy-binary.git
 			make
 			./fiptool create --ddr-immem-udimm-1d ddr-phy-binary/lx2160a/ddr4_pmu_train_imem.bin --ddr-immem-udimm-2d ddr-phy-binary/lx2160a/ddr4_2d_pmu_train_imem.bin --ddr-dmmem-udimm-1d ddr-phy-binary/lx2160a/ddr4_pmu_train_dmem.bin --ddr-dmmem-udimm-2d ddr-phy-binary/lx2160a/ddr4_2d_pmu_train_dmem.bin --ddr-immem-rdimm-1d ddr-phy-binary/lx2160a/ddr4_rdimm_pmu_train_imem.bin --ddr-immem-rdimm-2d ddr-phy-binary/lx2160a/ddr4_rdimm2d_pmu_train_imem.bin --ddr-dmmem-rdimm-1d ddr-phy-binary/lx2160a/ddr4_rdimm_pmu_train_dmem.bin --ddr-dmmem-rdimm-2d ddr-phy-binary/lx2160a/ddr4_rdimm2d_pmu_train_dmem.bin fip_ddr_all.bin
 		fi
@@ -148,7 +177,7 @@ if [[ ! -f $ROOTDIR/build/ubuntu-core.ext4 ]]; then
 	mkdir -p ubuntu
 	cd ubuntu
 	if [ ! -d buildroot ]; then
-		git clone https://github.com/buildroot/buildroot -b $BUILDROOT_VERSION
+		git clone $SHALLOW_FLAG https://github.com/buildroot/buildroot -b $BUILDROOT_VERSION
 	fi
 	cd buildroot
 	cp $ROOTDIR/configs/buildroot/lx2160acex7_defconfig configs/
@@ -197,9 +226,7 @@ fi
 
 if [[ ! -d $ROOTDIR/build/qoriq-mc-binary ]]; then
 	cd $ROOTDIR/build
-	git clone https://github.com/NXP/qoriq-mc-binary.git
-	cd qoriq-mc-binary
-	git checkout -b $RELEASE refs/tags/$RELEASE
+	git clone $SHALLOW_FLAG https://github.com/NXP/qoriq-mc-binary.git -b $RELEASE
 fi
 
 ###############################################################################
@@ -219,26 +246,52 @@ echo "#include <configs/lx2160a_${SPEED}.rcwi>" >> RCW/template.rcw
 echo "#include <configs/lx2160a_SD1_${arr[0]}.rcwi>" >> RCW/template.rcw
 echo "#include <configs/lx2160a_SD2_${arr[1]}.rcwi>" >> RCW/template.rcw
 echo "#include <configs/lx2160a_SD3_${arr[2]}.rcwi>" >> RCW/template.rcw
+if [ "x$SECURE" == "xtrue" ]; then
+	echo "SB_EN=1" #>> RCW/template.rcw
+fi
 IFS=$OLDIFS
 make clean
 make -j${PARALLEL}
 
+if [ "x$SECURE" == "xtrue" ]; then
+	echo "Building CST"
+	cd $ROOTDIR/build/cst
+	make
+	./gen_fusescr input_files/gen_fusescr/ls2088_1088/input_fuse_file
+fi
+
 echo "Build u-boot"
 cd $ROOTDIR/build/u-boot
 #make distclean
-make lx2160acex7_tfa_defconfig
+if [ "x$SECURE" == "xtrue" ]; then
+	make lx2160acex7_tfa_SECURE_BOOT_defconfig
+else
+	make lx2160acex7_tfa_defconfig
+fi
 make -j${PARALLEL}
 export BL33=$ROOTDIR/build/u-boot/u-boot.bin
 
 echo "Building atf"
 cd $ROOTDIR/build/atf/
-make PLAT=lx2160acex7 clean
-make -j${PARALLEL} PLAT=lx2160acex7 all fip pbl RCW=$ROOTDIR/build/rcw/lx2160acex7/RCW/template.bin TRUSTED_BOARD_BOOT=0 GENERATE_COT=0 BOOT_MODE=auto SECURE_BOOT=false
+make PLAT=lx2160acex7 distclean
+if [ "x$SECURE" == "xtrue" ]; then
+	if [ ! -f "srk.pub" ] || [ ! -f "srk.pri" ]; then
+		echo "Create srk.pub and srk.pri pair via ./gen_keys 4096 under $ROOTDIR/build/cst and place them under $ROOTDIR/build/atf"
+		exit -1
+	fi
+	# Following is without COT
+	# With secure boot auto mode is not supported... yet.. only flexspi_nor or sd
+	# that are needed to be stated explicitly
+	BL2=bl2_flexspi_nor_sec; BOOT_MODE_VAR=flexspi_nor
+	cp tools/fiptool/ddr-phy-binary/lx2160a/*.bin .
+	make -j${PARALLEL} PLAT=lx2160acex7 all fip fip_ddr_sec fip_fuse pbl RCW=$ROOTDIR/build/rcw/lx2160acex7/RCW/template.bin TRUSTED_BOARD_BOOT=1 CST_DIR=$ROOTDIR/build/cst/ GENERATE_COT=0 BOOT_MODE=${BOOT_MODE_VAR} SECURE_BOOT=yes FUSE_PROG=1 FUSE_PROV_FILE=$ROOTDIR/build/cst/fuse_scr.bin $ATF_DEBUG
+else
+	make -j${PARALLEL} PLAT=lx2160acex7 all fip pbl RCW=$ROOTDIR/build/rcw/lx2160acex7/RCW/template.bin TRUSTED_BOARD_BOOT=0 GENERATE_COT=0 BOOT_MODE=auto SECURE_BOOT=false
+fi
 
 echo "Building mc-utils"
 cd $ROOTDIR/build/mc-utils
 make -C config/
-
 
 echo "Building the kernel"
 cd $ROOTDIR/build/linux
@@ -316,11 +369,11 @@ cd $ROOTDIR/build/dpdk
 export CROSS=$CROSS_COMPILE
 export RTE_SDK=$ROOTDIR/build/dpdk
 export DESTDIR=$ROOTDIR/build/dpdk/install
-export RTE_TARGET=arm64-dpaa2-linuxapp-gcc
-#make -j32 T=arm64-dpaa2-linuxapp-gcc CONFIG_RTE_KNI_KMOD=n CONFIG_RTE_LIBRTE_PMD_OPENSSL=n clean
-make -j32 T=arm64-dpaa2-linuxapp-gcc CONFIG_RTE_KNI_KMOD=n CONFIG_RTE_LIBRTE_PMD_OPENSSL=n install
-make -j32 T=arm64-dpaa2-linuxapp-gcc CONFIG_RTE_KNI_KMOD=n CONFIG_RTE_LIBRTE_PMD_OPENSSL=n -C examples/l2fwd install
-make -j32 T=arm64-dpaa2-linuxapp-gcc CONFIG_RTE_KNI_KMOD=n CONFIG_RTE_LIBRTE_PMD_OPENSSL=n -C examples/l3fwd install
+export RTE_TARGET=arm64-dpaa-linuxapp-gcc
+#make -j32 T=arm64-dpaa-linuxapp-gcc CONFIG_RTE_KNI_KMOD=n CONFIG_RTE_LIBRTE_PMD_OPENSSL=n clean
+make -j32 T=arm64-dpaa-linuxapp-gcc CONFIG_RTE_KNI_KMOD=n CONFIG_RTE_LIBRTE_PMD_OPENSSL=n install
+make -j32 T=arm64-dpaa-linuxapp-gcc CONFIG_RTE_KNI_KMOD=n CONFIG_RTE_LIBRTE_PMD_OPENSSL=n -C examples/l2fwd install
+make -j32 T=arm64-dpaa-linuxapp-gcc CONFIG_RTE_KNI_KMOD=n CONFIG_RTE_LIBRTE_PMD_OPENSSL=n -C examples/l3fwd install
 
 
 ###############################################################################
@@ -382,7 +435,7 @@ dd if=$ROOTDIR/images/tmp/ubuntu-core.ext4 of=$ROOTDIR/images/tmp/ubuntu-core.im
 
 echo "Assembling Boot Image"
 cd $ROOTDIR/
-IMG=lx2160acex7_${SPEED}_${SERDES}.img
+IMG=lx2160acex7_${SPEED}_${SERDES}-${REPO_PREFIX}.img
 rm -rf $ROOTDIR/images/${IMG}
 truncate -s 528M $ROOTDIR/images/${IMG}
 #dd if=/dev/zero of=$ROOTDIR/images/${IMG} bs=1M count=1
@@ -391,31 +444,40 @@ truncate -s 463M $ROOTDIR/images/tmp/boot.part
 mkfs.ext4 -b 4096 -F $ROOTDIR/images/tmp/boot.part
 \rm -rf $ROOTDIR/images/tmp/xspi_header.img
 truncate -s 128K $ROOTDIR/images/tmp/xspi_header.img
-dd if=$ROOTDIR/build/atf/build/lx2160acex7/release/bl2_auto.pbl of=$ROOTDIR/images/tmp/xspi_header.img bs=512 conv=notrunc
+dd if=$ROOTDIR/build/atf/build/lx2160acex7/${ATF_BUILD}/${BL2}.pbl of=$ROOTDIR/images/tmp/xspi_header.img bs=512 conv=notrunc
 e2cp -G 0 -O 0 $ROOTDIR/images/tmp/xspi_header.img $ROOTDIR/images/tmp/boot.part:/
 
 # PFE firmware at 0x100
 
 # FIP (BL31+BL32+BL33) at 0x800
-dd if=$ROOTDIR/build/atf/build/lx2160acex7/release/fip.bin of=images/${IMG} bs=512 seek=2048 conv=notrunc
+dd if=$ROOTDIR/build/atf/build/lx2160acex7/${ATF_BUILD}/fip.bin of=images/${IMG} bs=512 seek=2048 conv=notrunc
 
 # DDR PHY FIP at 0x4000
-dd if=$ROOTDIR/build/atf/tools/fiptool/fip_ddr_all.bin of=images/${IMG} bs=512 seek=16384 conv=notrunc
+if [ "x$SECURE" == "xtrue" ]; then
+	dd if=$ROOTDIR/build/atf/fip_ddr_sec.bin of=images/${IMG} bs=512 seek=16384 conv=notrunc
+else
+	dd if=$ROOTDIR/build/atf/tools/fiptool/fip_ddr_all.bin of=images/${IMG} bs=512 seek=16384 conv=notrunc
+fi
+
 # Env variables at 0x2800
 
 # Secureboot headers at 0x3000
 
+# Fuse header FIP at 0x4400
+if [ "x$SECURE" == "xtrue" ]; then
+	dd if=$ROOTDIR/build/atf/build/lx2160acex7/${ATF_BUILD}/fuse_fip.bin of=images/${IMG} bs=512 seek=17408 conv=notrunc
+fi
+
 # DPAA1 FMAN ucode at 0x4800
 
 # DPAA2-MC at 0x5000
-if [ "x$RELEASE" == "xLSDK-19.09" ]; then
-	MC=mc_10.18.0_lx2160a.itb
-elif [ "x$RELEASE" == "xlx2160a-early-access-bsp0.7" ]; then
-	MC=mc_10.20.1_lx2160a.itb
+if [ "x$RELEASE" == "xLSDK-20.04" ]; then
+	MC=mc_10.24.0_lx2160a.itb
+	dd if=$ROOTDIR/build/qoriq-mc-binary/lx2160a/${MC} of=images/${IMG} bs=512 seek=20480 conv=notrunc
 else
-	MC=`ls $ROOTDIR/build/qoriq-mc-binary/lx2160a/ | cut -f1`
+	MC=`ls $ROOTDIR/build/qoriq-mc-binary/lx216?a/ | cut -f1`
+	dd if=$ROOTDIR/build/qoriq-mc-binary/lx216xa/${MC} of=images/${IMG} bs=512 seek=20480 conv=notrunc
 fi
-dd if=$ROOTDIR/build/qoriq-mc-binary/lx2160a/${MC} of=images/${IMG} bs=512 seek=20480 conv=notrunc
 
 # DPAA2 DPL at 0x6800
 dd if=$ROOTDIR/build/mc-utils/config/lx2160a/CEX7/${DPL} of=images/${IMG} bs=512 seek=26624 conv=notrunc
@@ -428,9 +490,9 @@ dd if=$ROOTDIR/build/linux/kernel-lx2160acex7.itb of=images/${IMG} bs=512 seek=3
 
 # Ramdisk at 0x10000
 # RCW+PBI+BL2 at block 8
-dd if=$ROOTDIR/images/${IMG} of=$ROOTDIR/images/lx2160acex7_xspi_${SPEED}_${SERDES}.img bs=1M count=64
-dd if=$ROOTDIR/build/atf/build/lx2160acex7/release/bl2_auto.pbl of=images/lx2160acex7_xspi_${SPEED}_${SERDES}.img bs=512 conv=notrunc
-dd if=$ROOTDIR/build/atf/build/lx2160acex7/release/bl2_auto.pbl of=images/${IMG} bs=512 seek=8 conv=notrunc
+dd if=$ROOTDIR/images/${IMG} of=$ROOTDIR/images/lx2160acex7_xspi_${SPEED}_${SERDES}-${REPO_PREFIX}.img bs=1M count=64
+dd if=$ROOTDIR/build/atf/build/lx2160acex7/${ATF_BUILD}/${BL2}.pbl of=images/lx2160acex7_xspi_${SPEED}_${SERDES}-${REPO_PREFIX}.img bs=512 conv=notrunc
+dd if=$ROOTDIR/build/atf/build/lx2160acex7/${ATF_BUILD}/${BL2}.pbl of=images/${IMG} bs=512 seek=8 conv=notrunc
 
 # Copy first 64MByte from image excluding MBR to ubuntu-core.img for eMMC boot
 dd if=images/${IMG} of=$ROOTDIR/images/tmp/ubuntu-core.img bs=512 seek=1 skip=1 count=131071 conv=notrunc
